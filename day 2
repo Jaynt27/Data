@@ -1,0 +1,131 @@
+import pandas as pd
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+MONTH_TO_NUM = {
+    month.lower(): idx for idx, month in enumerate(
+        ["January", "February", "March", "April", "May", "June",
+         "July", "August", "September", "October", "November", "December"], 1)
+}
+def convert_duration(duration):
+    """
+    Convert a string like '2-4' into a tuple (min, max).
+    If only one number or invalid, return appropriate default.
+    """
+    if isinstance(duration, str) and '-' in duration:
+        try:
+            low, high = map(float, duration.split('-', 1))
+            return (low, high)
+        except:
+            return (None, None)
+    try:
+        value = float(duration)
+        return (value, value)
+    except:
+        return (None, None)
+
+def is_month_in_range(range_text, user_month):
+    """
+    Verify if a month (e.g. 'June') falls within a specified range like 'Nov-Feb'.
+    Handles wrap-around year ranges too.
+    """
+    if not isinstance(range_text, str) or not user_month:
+        return False
+
+    month_num = MONTH_TO_NUM.get(user_month.strip().lower())
+    if not month_num:
+        return False
+
+    parts = [p.strip().lower() for p in range_text.split('-', 1)]
+    if len(parts) == 2:
+        start = MONTH_TO_NUM.get(parts[0])
+        end = MONTH_TO_NUM.get(parts[1])
+        if not start or not end:
+            return False
+        if start <= end:
+            return start <= month_num <= end
+        else:
+            return month_num >= start or month_num <= end
+    else:
+        return user_month.lower() in range_text.lower()
+
+def collect_user_filters():
+    print("Tell us your travel preferences:\n")
+    return {
+        "city_filter":     input("City: ").strip(),
+        "place_filter":    input("Place: ").strip(),
+        "min_rating":      input("Minimum Rating: ").strip(),
+        "max_duration":    input("Max Days of Stay: ").strip(),
+        "preferred_month": input("Preferred Travel Month: ").strip(),
+        "search_terms":    input("Keywords (e.g., beaches, temples): ").strip(),
+        "result_limit":    input("Number of results to show: ").strip(),
+    }
+
+def apply_filters_and_rank(dataframe, user_query):
+    data = dataframe.copy()
+    data['merged_text'] = (
+        data['place_desc'].fillna('') + ' ' + data['city_desc'].fillna('')
+    ).str.strip()
+    if user_query['city_filter']:
+        data = data[data['city'].str.contains(user_query['city_filter'], case=False, na=False)]
+
+    if user_query['place_filter']:
+        data = data[data['place'].str.contains(user_query['place_filter'], case=False, na=False)]
+
+    if user_query['min_rating']:
+        try:
+            rating = float(user_query['min_rating'])
+            data = data[data['ratings_place'] >= rating]
+        except:
+            pass
+
+    if user_query['max_duration']:
+        try:
+            limit_days = int(user_query['max_duration'])
+            data = data[data['ideal_duration'].apply(
+                lambda d: convert_duration(d)[1] is not None and convert_duration(d)[1] <= limit_days
+            )]
+        except:
+            pass
+
+    if user_query['preferred_month']:
+        data = data[data['best_time_to_visit'].fillna('').apply(
+            lambda r: is_month_in_range(r, user_query['preferred_month'])
+        )]
+    if user_query['search_terms']:
+        if not data.empty:
+            tfidf = TfidfVectorizer(stop_words='english')
+            doc_matrix = tfidf.fit_transform(data['merged_text'])
+            query_vec = tfidf.transform([user_query['search_terms']])
+            similarity_scores = cosine_similarity(query_vec, doc_matrix).flatten()
+            data['match_score'] = similarity_scores
+            data = data[data['match_score'] > 0].sort_values(by='match_score', ascending=False)
+        else:
+            print("Filtered results empty. Skipping keyword match.")
+            data['match_score'] = None
+    else:
+        data['match_score'] = None
+
+    try:
+        limit = int(user_query['result_limit']) if user_query['result_limit'] else 10
+    except:
+        limit = 10
+
+    return data.head(limit)
+
+def run_recommender():
+    df = pd.read_json("./famous_indian_tourist_places_3000.jsonl", lines=True)
+    preferences = collect_user_filters()
+    matched_places = apply_filters_and_rank(df, preferences)
+    if matched_places.empty:
+        print("\nNo destinations matched your filters.")
+    else:
+        print("\nTop Travel Suggestions:\n")
+        for _, row in matched_places.iterrows():
+            print(f"{row['place']} ({row['city']}) — Rating: {row['ratings_place']}")
+            print(f"About: {row['place_desc']}")
+            if row['match_score'] is not None:
+                print(f"Match Score: {row['match_score']:.3f}")
+            print("-" * 50)
+
+if __name__ == "__main__":
+    run_recommender()
